@@ -106,6 +106,7 @@ export default function App() {
   const [displaySeconds, setDisplaySeconds] = useState(0);
   const [lastCloudSyncTime, setLastCloudSyncTime] = useState<string>('');
   const ignoreNextAutoPush = React.useRef(false);
+  const socketRef = React.useRef<WebSocket | null>(null);
 
   // ────────────────────────────────────────────────────────
   // INITIAL LOAD & LOCALSTORAGE ATTACHMENTS
@@ -457,7 +458,7 @@ export default function App() {
     };
   }, [stopwatch]);
 
-  // Debounced auto-push for real-time multiplayer updates
+  // Debounced auto-push for real-time multiplayer updates (Backup Save)
   useEffect(() => {
     if (!syncCode) return;
     if (ignoreNextAutoPush.current) {
@@ -494,6 +495,145 @@ export default function App() {
 
     return () => clearTimeout(delayDebounceId);
   }, [subjects, progress, materials, examDate, stopwatch, syncCode]);
+
+  // Helper to push update to socket instantly
+  const emitWebSocketUpdate = () => {
+    if (!syncCode) return;
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      try {
+        const payload = {
+          subjects,
+          progress,
+          materials,
+          examDate: examDate ? examDate.toISOString() : null,
+          apiConfig,
+          stopwatch,
+          syncedAt: new Date().toISOString()
+        };
+        socketRef.current.send(JSON.stringify({
+          type: "update",
+          syncCode,
+          payload
+        }));
+        console.log("⚡ Instant WebSocket state-sync update broadcasted");
+      } catch (err) {
+        console.warn("WebSocket emit error:", err);
+      }
+    }
+  };
+
+  // Live Instant WebSocket Broadcast effect
+  useEffect(() => {
+    if (!syncCode) return;
+    if (ignoreNextAutoPush.current) {
+      ignoreNextAutoPush.current = false;
+      return;
+    }
+    emitWebSocketUpdate();
+  }, [subjects, progress, materials, examDate, stopwatch, syncCode]);
+
+  // Establish WebSockets Live connection for instant, zero-lag co-study sync
+  useEffect(() => {
+    if (!syncCode) {
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
+      return;
+    }
+
+    let isDisposed = false;
+    let connectTimeoutId: any = null;
+
+    const connectWS = () => {
+      if (isDisposed) return;
+
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = window.location.host;
+      const wsUrl = `${protocol}//${host}`;
+      console.log("Connecting state-sync WebSocket to:", wsUrl);
+
+      const socket = new WebSocket(wsUrl);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        if (isDisposed) {
+          socket.close();
+          return;
+        }
+        console.log("WebSocket connected successfully for key:", syncCode);
+        // Register key
+        socket.send(JSON.stringify({
+          type: "join",
+          syncCode
+        }));
+      };
+
+      socket.onmessage = (event) => {
+        if (isDisposed) return;
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "sync_update" && msg.payload) {
+            const parsed = msg.payload;
+            
+            console.log("✨ WebSocket instant update received", parsed);
+            
+            ignoreNextAutoPush.current = true;
+            
+            if (parsed.subjects) {
+              setSubjects(parsed.subjects);
+              localStorage.setItem('bcs_subjects', JSON.stringify(parsed.subjects));
+            }
+            if (parsed.progress) {
+              setProgress(parsed.progress);
+              localStorage.setItem('bcs_progress', JSON.stringify(parsed.progress));
+            }
+            if (parsed.materials) {
+              setMaterials(parsed.materials);
+              localStorage.setItem('bcs_materials', JSON.stringify(parsed.materials));
+            }
+            if (parsed.examDate) {
+              const d = new Date(parsed.examDate);
+              setExamDate(d);
+              localStorage.setItem('bcs_exam_date', d.toISOString());
+            }
+            if (parsed.stopwatch) {
+              setStopwatch(parsed.stopwatch);
+              localStorage.setItem('bcs_stopwatch', JSON.stringify(parsed.stopwatch));
+            }
+            if (parsed.syncedAt) {
+              setLastCloudSyncTime(parsed.syncedAt);
+            }
+          }
+        } catch (err) {
+          console.warn("WebSocket parse error:", err);
+        }
+      };
+
+      socket.onclose = () => {
+        if (isDisposed) return;
+        socketRef.current = null;
+        console.warn("WebSocket state-sync disconnected. Reconnecting in 3s...");
+        connectTimeoutId = setTimeout(connectWS, 3000);
+      };
+
+      socket.onerror = (err) => {
+        console.error("WebSocket transport error:", err);
+        socket.close();
+      };
+    };
+
+    connectWS();
+
+    return () => {
+      isDisposed = true;
+      if (connectTimeoutId) clearTimeout(connectTimeoutId);
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
+    };
+  }, [syncCode]);
 
   // Live polling cloud pull effect to sync other devices in real-time
   useEffect(() => {

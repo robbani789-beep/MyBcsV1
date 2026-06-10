@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
+import { WebSocketServer, WebSocket } from "ws";
 
 async function startServer() {
   const app = express();
@@ -106,8 +107,69 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
+  });
+
+  // Attach WebSocket Server
+  const wss = new WebSocketServer({ server });
+
+  // Map of room (syncCode) -> Set of active WebSocket client connections
+  const rooms = new Map<string, Set<WebSocket>>();
+
+  wss.on("connection", (ws) => {
+    let currentSyncCode: string | null = null;
+
+    ws.on("message", (messageStr) => {
+      try {
+        const msg = JSON.parse(messageStr.toString());
+
+        if (msg.type === "join") {
+          const { syncCode } = msg;
+          if (syncCode) {
+            currentSyncCode = syncCode;
+            if (!rooms.has(syncCode)) {
+              rooms.set(syncCode, new Set());
+            }
+            rooms.get(syncCode)!.add(ws);
+            console.log(`Socket joined room: ${syncCode}. Pool size: ${rooms.get(syncCode)!.size}`);
+          }
+        } else if (msg.type === "update") {
+          const { syncCode, payload } = msg;
+          if (syncCode && payload) {
+            // Broadcast this update to all other connected sockets in the exact same room instantly!
+            const clients = rooms.get(syncCode);
+            if (clients) {
+              for (const client of clients) {
+                if (client !== ws && client.readyState === WebSocket.OPEN) {
+                  client.send(JSON.stringify({
+                    type: "sync_update",
+                    payload
+                  }));
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error("WebSocket message processing failed", err);
+      }
+    });
+
+    ws.on("close", () => {
+      if (currentSyncCode && rooms.has(currentSyncCode)) {
+        const SetOfClients = rooms.get(currentSyncCode)!;
+        SetOfClients.delete(ws);
+        if (SetOfClients.size === 0) {
+          rooms.delete(currentSyncCode);
+        }
+        console.log(`Socket left room: ${currentSyncCode}. Pool size remaining: ${SetOfClients.size}`);
+      }
+    });
+
+    ws.on("error", (err) => {
+      console.error("Socket error", err);
+    });
   });
 }
 
