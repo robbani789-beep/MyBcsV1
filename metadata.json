@@ -1,0 +1,6 @@
+{
+  "name": "BCS Study Hub Player",
+  "description": "An interactive, elegant, serverless study assistant for BCS exam preparation featuring summaries, recall cards, quizzes, and scratchpad notes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
